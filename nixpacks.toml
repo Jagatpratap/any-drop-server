@@ -1,0 +1,21 @@
+# Nixpacks build for the AnyDrop server (Rust, lives in server/).
+# rustup installs the current stable toolchain; dependencies need Rust >= 1.87.
+
+providers = []
+
+[phases.setup]
+nixPkgs = ["rustup", "gcc"]
+
+[phases.build]
+cmds = [
+  "rustup default stable",
+  "cd server && cargo build --release",
+  "cp server/target/release/anydrop-server ./anydrop-server",
+]
+
+[start]
+cmd = "./anydrop-server"
+
+[variables]
+WEB_DIR = "web"
+DATA_DIR = "/data"

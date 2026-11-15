@@ -62,7 +62,7 @@ docker build -t anydrop . && docker run -p 8080:8080 anydrop
 ```
 Put it behind HTTPS (Caddy, Cloudflare, Fly.io, a VPS). HTTPS is needed for "Install app" on Android and for iOS.
 
-**Auto-deploy from this repo:** Any host that builds a `Dockerfile` works (Render, Railway, Fly.io, Koyeb, a VPS…).
+**Auto-deploy from this repo:** Any host that builds a `Dockerfile` works (Render, Railway, Fly.io, Koyeb, a VPS…). Nixpacks hosts (Coolify, Railway) also work: `nixpacks.toml` builds the Rust server with the current stable toolchain and starts `./anydrop-server`, so no build or start command needs to be set.
 
 - **Port:** the server listens on `$PORT` (default 8080). Most hosts set it for you.
 - **HTTPS is required** for the web app's crypto and camera, and the host's HTTPS proxy must allow WebSocket upgrades on `/ws` (all of the above do).
