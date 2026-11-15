@@ -1,0 +1,12 @@
+server/target/
+.DS_Store
+server/data/
+data/
+mobile/node_modules/
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/app/.cxx/
+# The Android app and its builds live outside this server repo for now
+mobile/
+dist/

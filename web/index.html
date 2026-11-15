@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#0b0d12">
+  <title>AnyDrop</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app" class="app">
+    <aside class="side" aria-label="Chats">
+      <header class="side-head">
+        <button id="meBtn" class="me" title="This device: name and type">
+          <span id="meAvatar" class="avatar sm"></span>
+          <span class="me-text"><b id="meName"></b><small><i id="connDot" class="dot"></i><span id="connText">Connecting…</span></small></span>
+        </button>
+        <button id="addBtn" class="icon-btn" title="Add a device" aria-label="Add a device"></button>
+      </header>
+      <div class="search"><input id="search" type="search" placeholder="Search chats" aria-label="Search chats"></div>
+      <ul id="chats" class="chats"></ul>
+      <div id="noChats" class="side-empty" hidden>
+        <p><b>No devices yet</b></p>
+        <p>Scan a QR code to add your phone, laptop or a friend's device. Messages go straight from device to device.</p>
+        <button class="btn" id="addBtn2">Add a device</button>
+      </div>
+    </aside>
+
+    <section class="main" aria-live="polite">
+      <div id="welcome" class="welcome">
+        <img src="icon.svg" alt="" width="64" height="64">
+        <h1>AnyDrop</h1>
+        <p>Pick a chat on the left. Messages and files go directly between your devices: the server only helps them find each other.</p>
+      </div>
+
+      <div id="chat" class="chat" hidden>
+        <header class="chat-head">
+          <button id="backBtn" class="icon-btn back" aria-label="Back to chats"></button>
+          <button id="peerBtn" class="peer-btn" title="Device info">
+            <span id="peerAvatar" class="avatar sm"></span>
+            <span class="peer-text"><b id="peerName"></b><small id="peerStatus"></small></span>
+          </button>
+          <button id="attachBtn2" class="icon-btn" title="Send files" aria-label="Send files"></button>
+        </header>
+        <div id="msgs" class="msgs" tabindex="-1"></div>
+        <div id="notice" class="notice" hidden></div>
+        <form id="composer" class="composer">
+          <button type="button" id="attachBtn" class="icon-btn" title="Attach files" aria-label="Attach files"></button>
+          <textarea id="input" rows="1" placeholder="Message" aria-label="Message" enterkeyhint="send"></textarea>
+          <button id="sendBtn" class="send" aria-label="Send"></button>
+        </form>
+        <div id="dropHint" class="drop-hint" hidden>Drop files to send</div>
+      </div>
+    </section>
+  </div>
+
+  <input id="picker" type="file" multiple hidden>
+
+  <dialog id="addDlg" class="sheet">
+    <h2>Add a device</h2>
+    <div class="tabs" role="tablist">
+      <button role="tab" data-tab="show" aria-selected="true">My QR code</button>
+      <button role="tab" data-tab="scan">Scan</button>
+      <button role="tab" data-tab="code">Enter code</button>
+    </div>
+    <div class="pane" data-pane="show">
+      <div class="qr"><img id="qrImg" alt="Pairing QR code" width="240" height="240"></div>
+      <p class="muted center">Point the other device's camera at this code. Or type this code on it:</p>
+      <div id="code" class="code">––– –––</div>
+      <p id="pairTtl" class="muted center small"></p>
+    </div>
+    <div class="pane" data-pane="scan" hidden>
+      <video id="scanVideo" class="scan" playsinline muted></video>
+      <p id="scanMsg" class="muted center"></p>
+    </div>
+    <form class="pane" data-pane="code" id="joinForm" hidden>
+      <p class="muted">Open <b>Add a device</b> on the other device and type the 6-digit code it shows.</p>
+      <input id="codeIn" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="123 456" aria-label="Pairing code">
+      <button class="btn">Pair</button>
+    </form>
+    <p id="pairErr" class="err" role="alert"></p>
+    <div class="row"><button class="btn ghost" id="addClose">Close</button></div>
+  </dialog>
+
+  <dialog id="meDlg" class="sheet">
+    <form id="meForm" method="dialog">
+      <h2>This device</h2>
+      <label class="field"><span>Name</span><input id="meNameIn" maxlength="40" required></label>
+      <label class="field"><span>Device type</span><select id="meDeviceIn"></select></label>
+      <div class="field"><span>Device ID</span><code id="meId" class="fp"></code>
+        <small class="muted">Made on this device the first time it ran. Nobody else can use it.</small></div>
+      <div class="field"><span>Notifications</span><button type="button" class="btn ghost" id="notifBtn">Turn on</button></div>
+      <div class="row">
+        <button type="button" class="btn ghost" id="meCancel">Cancel</button>
+        <button class="btn" value="save">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="peerDlg" class="sheet">
+    <div class="peer-card">
+      <span id="pdAvatar" class="avatar lg"></span>
+      <h2 id="pdName"></h2>
+      <p id="pdType" class="muted"></p>
+    </div>
+    <div class="field"><span>Device ID</span><code id="pdId" class="fp"></code>
+      <small class="muted">Check that it matches the ID shown in that device's settings.</small></div>
+    <div class="row spread">
+      <button class="btn ghost danger" id="pdRemove">Remove device</button>
+      <button class="btn ghost" id="pdClear">Clear chat</button>
+      <button class="btn" id="pdClose">Close</button>
+    </div>
+  </dialog>
+
+  <div id="replaced" class="replaced" hidden>
+    <p>AnyDrop is open in another tab or window.</p>
+    <button class="btn" id="useHere">Use here</button>
+  </div>
+  <div id="toast" class="toast" role="status"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
