@@ -62,18 +62,16 @@ docker build -t anydrop . && docker run -p 8080:8080 anydrop
 ```
 Put it behind HTTPS (Caddy, Cloudflare, Fly.io, a VPS). HTTPS is needed for "Install app" on Android and for iOS.
 
-## Roadmap
-1. Files and photos in the Android app (react-native-webrtc, same signaling as the web app).
-2. iOS app: same React Native code, with Apple push (APNs) instead of the background connection, since iOS doesn't allow one.
-3. Firebase push as a backup on Android, and Web Push for the web app.
-4. Share sheet ("Share → AnyDrop"), groups, voice/video calls (TURN).
-
-## Deploying (auto-deploy from this repo)
-
-Any host that builds a `Dockerfile` works (Render, Railway, Fly.io, Koyeb, a VPS…).
+**Auto-deploy from this repo:** Any host that builds a `Dockerfile` works (Render, Railway, Fly.io, Koyeb, a VPS…).
 
 - **Port:** the server listens on `$PORT` (default 8080). Most hosts set it for you.
 - **HTTPS is required** for the web app's crypto and camera, and the host's HTTPS proxy must allow WebSocket upgrades on `/ws` (all of the above do).
 - **Health check:** `GET /api/health` returns `ok`.
 - **Persistent disk:** mount a volume at `/data` (`DATA_DIR`). It holds only sealed, unreadable messages waiting for delivery. Without a volume, waiting messages are lost on redeploy.
 - **Optional:** `PUBLIC_URL=https://your-domain` so pairing QR codes point at the public address. `STUN_URL`, `TURN_URL`, `TURN_USER`, `TURN_PASS` for WebRTC.
+
+## Roadmap
+1. Files and photos in the Android app (react-native-webrtc, same signaling as the web app).
+2. iOS app: same React Native code, with Apple push (APNs) instead of the background connection, since iOS doesn't allow one.
+3. Firebase push as a backup on Android, and Web Push for the web app.
+4. Share sheet ("Share → AnyDrop"), groups, voice/video calls (TURN).
