@@ -4,8 +4,10 @@ AirDrop-style file sharing that works between any devices: Mac, Android, iOS, Wi
 
 ## Run it
 
+Needs [Bun](https://bun.sh) (`brew install oven-sh/bun/bun`).
+
 ```sh
-./run.sh
+./run.sh            # or: bun install && bun run start
 ```
 
 1. On the Mac, open http://localhost:8080 and tap the **QR icon** (Add a device).
@@ -13,7 +15,7 @@ AirDrop-style file sharing that works between any devices: Mac, Android, iOS, Wi
    No camera? Use **Enter code** with the 6-digit code instead.
 3. Chat and send files like in WhatsApp. Name each device and pick its type (Android phone, MacBook, …) by tapping your own name at the top left.
 
-If the phone can't connect, allow `anydrop-server` through the macOS firewall (System Settings → Network → Firewall).
+If the phone can't connect, allow `bun` through the macOS firewall (System Settings → Network → Firewall).
 
 ## Android app (React Native)
 
@@ -33,7 +35,7 @@ If the phone can't connect, allow `anydrop-server` through the macOS firewall (S
 
 ```
  Phone ──ws──┐                          ┌──ws── Web app / phone
-             ├── Rust server ───────────┤   login, presence, pairing,
+             ├── Bun + Elysia server ──┤   login, presence, pairing,
              │   (sealed mailbox)       │   sealed messages, WebRTC signaling
              └──── WebRTC (web app): files, direct ────┘
 ```
@@ -45,6 +47,14 @@ If the phone can't connect, allow `anydrop-server` through the macOS firewall (S
 - Chats are stored only on the devices.
 
 Testing several devices in one browser: add `?profile=a`, `?profile=b` to the URL.
+
+### Server code
+Plain JavaScript on Bun + Elysia, no build step:
+- `server/index.js`: HTTP routes (`/ws`, `/api/config`, `/api/qr`, `/api/health`, static web app) and startup.
+- `server/hub.js`: the protocol (login, presence, pairing, signaling, sealed mailbox).
+- `server/mailbox.js`: saves waiting messages to `DATA_DIR/mailbox.json`.
+
+`bun run dev` restarts the server when a file changes.
 
 ### Config (env vars)
 | Var | Default | |
@@ -62,7 +72,13 @@ docker build -t anydrop . && docker run -p 8080:8080 anydrop
 ```
 Put it behind HTTPS (Caddy, Cloudflare, Fly.io, a VPS). HTTPS is needed for "Install app" on Android and for iOS.
 
-**Auto-deploy from this repo:** Any host that builds a `Dockerfile` works (Render, Railway, Fly.io, Koyeb, a VPS…). Nixpacks hosts (Coolify, Railway) also work: `nixpacks.toml` builds the Rust server with the current stable toolchain and starts `./anydrop-server`, so no build or start command needs to be set.
+**Auto-deploy from this repo:** Any host that builds a `Dockerfile` works (Render, Railway, Fly.io, Koyeb, a VPS…). Nixpacks hosts (Coolify, Railway) also work and detect Bun automatically. If the host asks:
+
+| Setting | Value |
+|---|---|
+| Install / build command | `bun install` |
+| Start command | `bun run start` |
+| Port | `8080` (or whatever the host puts in `$PORT`) |
 
 - **Port:** the server listens on `$PORT` (default 8080). Most hosts set it for you.
 - **HTTPS is required** for the web app's crypto and camera, and the host's HTTPS proxy must allow WebSocket upgrades on `/ws` (all of the above do).

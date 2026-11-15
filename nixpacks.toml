@@ -1,20 +1,8 @@
-# Nixpacks build for the AnyDrop server (Rust, lives in server/).
-# rustup installs the current stable toolchain; dependencies need Rust >= 1.87.
-
-providers = []
-
-[phases.setup]
-nixPkgs = ["rustup", "gcc"]
-
-[phases.build]
-cmds = [
-  "rustup default stable",
-  "cd server && cargo build --release",
-  "cp server/target/release/anydrop-server ./anydrop-server",
-]
+# Nixpacks build for the AnyDrop server (Bun + Elysia).
+# Nixpacks picks the Bun provider from bun.lock and runs `bun install`.
 
 [start]
-cmd = "./anydrop-server"
+cmd = "bun run start"
 
 [variables]
 WEB_DIR = "web"

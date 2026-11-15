@@ -1,0 +1,18 @@
+{
+  "name": "anydrop-server",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "AnyDrop signaling server and mailbox (Bun + Elysia)",
+  "scripts": {
+    "start": "bun server/index.js",
+    "dev": "bun --watch server/index.js"
+  },
+  "engines": {
+    "bun": ">=1.1"
+  },
+  "dependencies": {
+    "elysia": "^1.4.32",
+    "qrcode": "^1.5.4"
+  }
+}
