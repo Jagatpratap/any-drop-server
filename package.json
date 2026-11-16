@@ -9,6 +9,7 @@
     "dev": "bun --watch server/index.js"
   },
   "engines": {
+    "node": ">=22",
     "bun": ">=1.1"
   },
   "dependencies": {

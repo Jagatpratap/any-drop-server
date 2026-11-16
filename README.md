@@ -72,7 +72,7 @@ docker build -t anydrop . && docker run -p 8080:8080 anydrop
 ```
 Put it behind HTTPS (Caddy, Cloudflare, Fly.io, a VPS). HTTPS is needed for "Install app" on Android and for iOS.
 
-**Auto-deploy from this repo:** Any host that builds a `Dockerfile` works (Render, Railway, Fly.io, Koyeb, a VPS…). Nixpacks hosts (Coolify, Railway) also work and detect Bun automatically. If the host asks:
+**Auto-deploy from this repo:** Any host that builds a `Dockerfile` works (Render, Railway, Fly.io, Koyeb, a VPS…). Nixpacks hosts (Coolify, Railway) also work with no config file: they detect Bun from `bun.lock`, and `engines.node` in `package.json` keeps Nixpacks off the removed Node 18. If the host asks:
 
 | Setting | Value |
 |---|---|
