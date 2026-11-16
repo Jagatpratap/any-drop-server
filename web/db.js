@@ -3,8 +3,11 @@
 //   kv        identity, profile
 //   contacts  { id, pub, name, device, addedAt, lastSeen, unread, last, waiting }
 //   messages  { key: chat:id, id, chat, dir, kind, ts, status, rs, ... }
-//             kind text: text · kind file (old, read-only): file+blob
+//             kind text: text, re? (id of the message it replies to) · kind file (old, read-only): file+blob
 //             kind drop: items, state, okd|got, ctl · kind call: video, outcome, dur
+//               a voice message is a drop whose one item has voice: true, dur, wave?
+//             any: react? { me?, them? } · a deleted message is kind text with gone: true and no text
+//   kv        also "outbox": reactions / deletes the server hasn't confirmed yet
 //   blobs     drop files, key "<chat>:<msg id>:<item index>"
 
 // ?profile=x keeps a separate identity, so one browser can act as several devices (testing).
@@ -41,6 +44,7 @@ export const db = {
   del: async (store, key) => done((await os(store, 'readwrite')).delete(key)),
   all: async (store) => done((await os(store)).getAll()),
   chat: async (chat) => done((await os('messages')).index('chat').getAll(chatRange(chat))),
+  delBlobs: async (msgKey) => done((await os('blobs', 'readwrite')).delete(IDBKeyRange.bound(`${msgKey}:`, `${msgKey}:\uffff`))),
   async clearChat(chat) {
     await done((await os('blobs', 'readwrite')).delete(IDBKeyRange.bound(`${chat}:`, `${chat}:\uffff`)));
     const store = await os('messages', 'readwrite');

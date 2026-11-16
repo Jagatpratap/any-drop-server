@@ -48,10 +48,20 @@
         </header>
         <div id="msgs" class="msgs" tabindex="-1"></div>
         <div id="notice" class="notice" hidden></div>
+        <div id="replyBar" class="reply-bar" hidden>
+          <div class="quote"><b id="replyWho"></b><span id="replyText"></span></div>
+          <button type="button" id="replyX" class="icon-btn" title="Cancel reply" aria-label="Cancel reply"></button>
+        </div>
         <form id="composer" class="composer">
           <button type="button" id="attachBtn" class="icon-btn" title="Attach files" aria-label="Attach files"></button>
           <textarea id="input" rows="1" placeholder="Message" aria-label="Message" enterkeyhint="send"></textarea>
-          <button id="sendBtn" class="send" aria-label="Send"></button>
+          <button type="button" id="micBtn" class="send" title="Record a voice message" aria-label="Record a voice message"></button>
+          <button id="sendBtn" class="send" aria-label="Send" hidden></button>
+          <div id="recBar" class="rec" hidden>
+            <button type="button" id="recCancel" class="icon-btn" title="Discard recording" aria-label="Discard recording"></button>
+            <span class="rec-live" role="timer" aria-label="Recording"><i class="rec-dot"></i><span id="recTime">0:00</span></span>
+            <button type="button" id="recSend" class="send" title="Send voice message" aria-label="Send voice message"></button>
+          </div>
         </form>
         <div id="dropHint" class="drop-hint" hidden>Drop files to send</div>
       </div>
@@ -59,6 +69,7 @@
   </div>
 
   <input id="picker" type="file" multiple hidden>
+  <div id="msgMenu" class="msg-menu" role="menu" aria-label="Message actions" hidden></div>
 
   <dialog id="addDlg" class="sheet">
     <h2>Add a device</h2>

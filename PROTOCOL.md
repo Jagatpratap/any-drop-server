@@ -35,10 +35,42 @@ box = base64url(iv[12] || AES-256-GCM(key, iv, aad = "<from>><to>:<mid>", utf8(j
 Sealed JSON bodies:
 | `k` | fields | |
 |---|---|---|
-| `text` | `text, ts` | message; its id is the `mid` |
+| `text` | `text, ts, re?` | message; its id is the `mid`. `re` = id of the message it replies to |
+| `react` | `id, e` | reaction to message `id`; `e: ""` takes it back |
+| `del` | `id` | the sender deleted its own message `id` for everyone |
 | `rcpt` | `st: "delivered" \| "read", mids` | ✓✓ / blue ✓✓ |
 | `typing` | | sent with `live:true` |
 | `profile` | `name, device` | name or type changed |
+
+Receivers ignore kinds and fields they don't know.
+
+### Replies
+`re` is the `mid` of an earlier message in the same chat, sent by either side (a text, a drop
+or a voice message), matching `[A-Za-z0-9_-]{1,64}`; anything else is ignored and the text is
+shown as a plain message. The quoted text is not sent: the receiver looks the message up
+locally and shows who wrote it and one line of it (its text, the drop's label, or
+"Voice message"), or just "Message" if it no longer has it.
+
+### Reactions
+`{k:"react", id, e}` is sent with a fresh `mid`, stored by the server like any message
+(never `live`), and retransmitted with the same `mid` until the server answers `sent`.
+`e` is the emoji, at most 16 UTF-16 code units; longer values are ignored. Each side has at
+most one reaction per message, so a new `react` replaces that side's previous one and
+`e: ""` removes it. `id` may be a message from either side. A reaction for an unknown or
+deleted message is ignored. Reactions are not messages: no ✓ / ✓✓ receipts, no unread count,
+no change to the chat-list preview. The web client offers 👍 ❤️ 😂 😮 😢 🙏 and stores
+`react: {me?, them?}` on the message.
+
+### Delete for everyone
+`{k:"del", id}` is sent with a fresh `mid`, stored and retransmitted like `react`. Only the
+author can delete: the receiver acts only if it has an *incoming* message `id` from that
+contact, and ignores the request otherwise. It keeps the message's place and time but
+replaces it with a tombstone ("This message was deleted"): text cleared, items and files
+dropped, reactions removed. If it was a drop still `asking` or `receiving`, the transfer is
+aborted as with `drop-cancel` (no `drop-no` / `drop-done` is sent back). The sender shows its
+own tombstone ("You deleted this message") and stops sending. "Delete for me" is local and
+sends nothing, except that a drop still open is closed first with `drop-cancel` (sender) or
+`drop-no` (receiver).
 
 ## WebRTC link (files)
 `signal {to, data}` is forwarded between online mutual contacts. Each pair of devices keeps one
@@ -70,6 +102,27 @@ first item without `ok`; the receiver discards a partial item and takes it again
 States: sender `asking → sending → done` or `declined | canceled | failed`;
 receiver `asking → receiving → done` or `declined | canceled`.
 A device may auto-accept drops from a contact if the user turned that on for that contact.
+
+### Voice messages
+A voice message is a `drop` with exactly one item that carries three extra fields:
+```
+{k:"drop", ts, items:[{name:"voice-1731752000000.webm", size, mime:"audio/webm", voice:true, dur:7.3, wave:"0138bdf…"}]}
+```
+- `voice`: `true`.
+- `dur`: length in seconds, a number from 0 to 3600 (the web client sends one decimal).
+- `wave`: optional, up to 48 lowercase hex digits, one per waveform bar, loudness `0`–`f`
+  from the start to the end of the recording.
+- `mime` has no parameters: `audio/webm` (Opus, `.webm`) or `audio/mp4` (AAC, `.m4a`).
+
+The receiver treats the drop as a voice message only if it has exactly one item, with
+`voice === true`, a `mime` starting with `audio/` and `size` ≤ 16 MiB (16777216). It then
+accepts it without asking (`drop-ok`, as with auto-accept) and shows a player instead of a
+file card; everything else (`drop-ok`, the `file:<id>:0` channel, `drop-done`, `drop-cancel`)
+is the ordinary drop flow, and the data-channel header stays `{drop, i, name, size, mime}`.
+An item with `voice: true` whose `dur` is not a number in 0..3600, or whose `wave` is not a
+string matching `^[0-9a-f]{0,48}$`, makes the whole request invalid and it is dropped. An
+item with `voice: true` that fails the one-item / `audio/` / size test is an ordinary file
+request that waits for Accept. Chat-list preview: `🎤 Voice message (0:07)`.
 
 ## Calls (voice and video)
 One extra `RTCPeerConnection` per call, signalled with `signal` frames (both must be online):

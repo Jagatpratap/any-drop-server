@@ -8,6 +8,8 @@
 // data channels). Calls use their own RTCPeerConnection. The server only passes the
 // signed offers/answers/ICE.
 // Ticks: clock = not on the server yet, ✓ = server has it, ✓✓ = delivered, blue = read.
+// Replies ride on the text body (`re`), reactions and "delete for everyone" are small sealed
+// notes of their own, and a voice message is a one-item drop that is accepted without asking.
 
 import { db } from './db.js';
 import { loadIdentity, verify, idFromPub, fingerprint } from './identity.js';
@@ -20,6 +22,11 @@ const MAX_TEXT = 20000;
 const MAX_ITEMS = 100;           // files per drop
 const MAX_DROP_JSON = 30000;     // keep a drop request well under the server's 48 KiB box limit
 const RING_TIMEOUT = 45000;
+const MAX_VOICE = 16 * 1024 * 1024; // a voice message bigger than this is treated as a plain file
+const MAX_REC = 10 * 60 * 1000;     // recording stops by itself here
+const MID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const WAVE_RE = /^[0-9a-f]{0,48}$/;
+const EMOJI = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
 const $ = (s) => document.querySelector(s);
 const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
@@ -57,6 +64,12 @@ const I = {
   right: svg('<path d="M9 5l7 7-7 7"/>'),
   download: svg('<path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/>'),
   image: svg('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.8"/><path d="M21 16l-5-5-9 9"/>'),
+  more: svg('<path d="M6 9.5l6 6 6-6"/>'),
+  reply: svg('<path d="M10 7L4 12l6 5v-3.5c5 0 8 1.5 10 5-.5-6-4-9.5-10-9.5z"/>'),
+  copy: svg('<rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M5.5 15.5h-.5a1.5 1.5 0 01-1.5-1.5V5A1.5 1.5 0 015 3.5h9A1.5 1.5 0 0115.5 5v.5"/>'),
+  trash: svg('<path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l.8 12a1.5 1.5 0 001.5 1.5h6.400a1.5 1.5 0 001.5-1.5l.8-12M10 11v5.5M14 11v5.5"/>'),
+  play: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.5v13a1 1 0 001.5.86l10.5-6.5a1 1 0 000-1.72L9.5 4.64A1 1 0 008 5.5z"/></svg>',
+  pause: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6.5" y="5" width="4" height="14" rx="1.2"/><rect x="13.5" y="5" width="4" height="14" rx="1.2"/></svg>',
   tick: '<svg viewBox="0 0 16 11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6l3 3 6-7"/></svg>',
   ticks: '<svg viewBox="0 0 16 11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 6l3 3 6-7M7.5 8.5l.5.5 6-7"/></svg>',
 };
@@ -110,6 +123,10 @@ const typingUntil = new Map();   // peer id -> timestamp
 const xfers = new Map();         // drop msg key -> { dc, link, i, bytes } (the item moving now)
 const urls = new Map();          // msg key or blob key -> object URL
 let call = null;                 // the call in progress (only one at a time)
+const outbox = new Map();        // mid -> { to, mid, body }: reactions / deletes the server hasn't confirmed
+let replyTo = null;              // { chat, id } the message being replied to
+let rec = null;                  // the voice recording in progress
+let player = null;               // { key, audio, dur } the voice message playing
 let active = null;               // open chat id
 let shown = [];                  // messages of the open chat
 let ws = null, wsUp = false, replaced = false, wsDelay = 1000;
@@ -121,11 +138,12 @@ let pairing = null;              // { token, code, expires } that we are showing
 // ---------- storage helpers ----------
 const keyOf = (chat, id) => `${chat}:${id}`;
 const saveContact = (c) => db.put('contacts', c).catch(console.warn);
+const lastOf = (m) => ({ key: m.key, ts: m.ts, dir: m.dir, status: m.kind === 'call' || m.gone ? null : m.status, text: previewOf(m) });
 async function saveMsg(m) {
   await db.put('messages', m);
   const c = contacts.get(m.chat);
   if (c && (!c.last || c.last.key === m.key || m.ts >= c.last.ts)) {
-    c.last = { key: m.key, ts: m.ts, dir: m.dir, status: m.kind === 'call' ? null : m.status, text: previewOf(m) };
+    c.last = lastOf(m);
     await saveContact(c);
   }
   if (m.chat === active) upsertShown(m);
@@ -164,8 +182,11 @@ async function onServer(m) {
     case 'online': onOnline(new Set(m.ids)); break;
     case 'msgs': mailChain = mailChain.then(() => onMail(m.items)).catch(console.warn); break;
     case 'live': onLive(m.msg); break;
-    case 'sent': if (contacts.has(m.to)) ctlSent(m.to, m.mid) || setStatus(m.to, m.mid, 'sent'); break;
-    case 'send-error': console.warn('server refused message', m.mid, m.message); break;
+    case 'sent':
+      if (outSent(m.mid)) break;
+      if (contacts.has(m.to)) ctlSent(m.to, m.mid) || setStatus(m.to, m.mid, 'sent');
+      break;
+    case 'send-error': console.warn('server refused message', m.mid, m.message); outSent(m.mid); break;
     case 'signal': queueSignal(m.from, m.data); break;
     case 'pair-open': showPairing(m); break;
     case 'pair-error':
@@ -193,18 +214,38 @@ async function post(peer, obj, { mid = uid(), live = false } = {}) {
   return send({ type: 'send', to: peer, mid, box: sealed, ...(live ? { live: true } : {}) });
 }
 
+// Reactions, deletes and the answers for drops that are no longer stored here: small notes
+// with nothing else to hang a "pending" flag on, so they wait in this list (kept in kv)
+// until the server confirms them.
+const saveOutbox = () => db.put('kv', [...outbox.values()], 'outbox').catch(console.warn);
+function queue(peer, body, mid = uid()) {
+  outbox.set(mid, { to: peer, mid, body });
+  saveOutbox();
+  post(peer, body, { mid });
+}
+function outSent(mid) {
+  if (!outbox.delete(mid)) return false;
+  saveOutbox();
+  return true;
+}
+
 // Everything the server hasn't confirmed yet, plus read receipts it never got.
 async function flushOutbox() {
   for (const c of contacts.values()) {
     if (!canSeal(c)) continue;
     const msgs = await db.chat(c.id);
     for (const m of msgs) {
-      if (m.dir === 'out' && m.kind === 'text' && m.status === 'pending') await post(c.id, { k: 'text', text: m.text, ts: m.ts }, { mid: m.id });
+      if (m.dir === 'out' && m.kind === 'text' && m.status === 'pending' && !m.gone) await post(c.id, textBody(m), { mid: m.id });
       if (m.dir === 'out' && m.kind === 'drop' && m.status === 'pending' && m.state !== 'canceled') await post(c.id, { k: 'drop', ts: m.ts, items: m.items }, { mid: m.id });
       if (m.kind === 'drop' && m.ctl && !m.ctl.sent) await sendCtl(m);
     }
     const reads = msgs.filter((m) => m.dir === 'in' && m.status === 'read' && !m.rs);
     if (reads.length && (await post(c.id, { k: 'rcpt', st: 'read', mids: reads.map((m) => m.id) }))) for (const m of reads) { m.rs = true; db.put('messages', m); }
+  }
+  // After the messages above, so a reaction never overtakes the message it is for.
+  for (const o of [...outbox.values()]) {
+    if (contacts.has(o.to)) await post(o.to, o.body, { mid: o.mid });
+    else outSent(o.mid);
   }
 }
 
@@ -222,7 +263,9 @@ async function onMail(items) {
       const key = keyOf(c.id, it.mid);
       if (!(await db.get('messages', key))) {
         typingUntil.delete(c.id);
-        await gotMessage({ key, id: it.mid, chat: c.id, dir: 'in', kind: 'text', text: d.text.slice(0, MAX_TEXT), ts: tsOf(d.ts), status: 'delivered' });
+        const m = { key, id: it.mid, chat: c.id, dir: 'in', kind: 'text', text: d.text.slice(0, MAX_TEXT), ts: tsOf(d.ts), status: 'delivered' };
+        if (typeof d.re === 'string' && MID_RE.test(d.re)) m.re = d.re;
+        await gotMessage(m);
       }
       if (!delivered.has(c.id)) delivered.set(c.id, []);
       delivered.get(c.id).push(it.mid);
@@ -231,13 +274,18 @@ async function onMail(items) {
       if (!items) { console.warn('dropped a bad drop request from', it.from); continue; }
       const key = keyOf(c.id, it.mid);
       if (!(await db.get('messages', key))) {
-        await gotMessage({ key, id: it.mid, chat: c.id, dir: 'in', kind: 'drop', items, ts: tsOf(d.ts), status: 'delivered', state: 'asking', got: items.map(() => false) });
-        if (c.autoAccept) await respondDrop(key, true);
+        const m = { key, id: it.mid, chat: c.id, dir: 'in', kind: 'drop', items, ts: tsOf(d.ts), status: 'delivered', state: 'asking', got: items.map(() => false) };
+        await gotMessage(m);
+        if (c.autoAccept || isVoice(m)) await respondDrop(key, true);
       }
       if (!delivered.has(c.id)) delivered.set(c.id, []);
       delivered.get(c.id).push(it.mid);
     } else if (DROP_CTL[d.k] && typeof d.id === 'string') {
       await onDropCtl(c, d.k, d.id);
+    } else if (d.k === 'react' && typeof d.id === 'string' && typeof d.e === 'string' && d.e.length <= 16) {
+      await setReact(keyOf(c.id, d.id), 'them', d.e);
+    } else if (d.k === 'del' && typeof d.id === 'string') {
+      await entomb(keyOf(c.id, d.id), 'in');
     } else if (d.k === 'rcpt' && Array.isArray(d.mids) && ['delivered', 'read'].includes(d.st)) {
       for (const id of d.mids.slice(0, 1000)) if (typeof id === 'string') await setStatus(c.id, id, d.st);
     } else if (d.k === 'profile') {
@@ -520,13 +568,28 @@ function cleanItems(items) {
   for (const x of items) {
     const size = Number(x?.size);
     if (!Number.isSafeInteger(size) || size < 0) return null;
-    out.push({ name: cleanFileName(x.name), size, mime: String(x.mime ?? '').slice(0, 100) });
+    const it = { name: cleanFileName(x.name), size, mime: String(x.mime ?? '').slice(0, 100) };
+    if (x.voice === true) {
+      // A voice message: its extra fields are either right or the whole request is refused.
+      const wave = x.wave ?? '';
+      if (typeof x.dur !== 'number' || !(x.dur >= 0 && x.dur <= 3600) || typeof wave !== 'string' || !WAVE_RE.test(wave)) return null;
+      it.voice = true;
+      it.dur = x.dur;
+      if (wave) it.wave = wave;
+    }
+    out.push(it);
   }
   return out;
 }
 
+// A voice message is a drop of exactly one small audio item marked `voice`.
+const isVoice = (m) => m.kind === 'drop' && m.items.length === 1 && m.items[0].voice === true
+  && /^audio\//i.test(m.items[0].mime) && m.items[0].size <= MAX_VOICE;
+const voiceDur = (m) => fmtDur(Math.round(m.items[0].dur || 0));
+
 function dropWhat(items) {
   const n = items.length;
+  if (isVoice({ kind: 'drop', items })) return 'Voice message';
   if (items.every((x) => isImg(x.mime))) return n === 1 ? '1 photo' : `${n} photos`;
   return n === 1 ? items[0].name : `${n} files`;
 }
@@ -549,7 +612,8 @@ function ctlSent(peer, mid) {
   return true;
 }
 
-async function sendFiles(peer, files) {
+// extra: optional per-file fields added to the items (voice messages).
+async function sendFiles(peer, files, extra = []) {
   files = files.filter((f) => f instanceof Blob);
   if (!files.length) return;
   if (!canSeal(contacts.get(peer))) return toast('Pair with this device again to send files (its encryption key is missing).');
@@ -557,7 +621,7 @@ async function sendFiles(peer, files) {
   const groups = [];
   let cur = [], len = 0;
   for (const f of files) {
-    const it = { name: cleanFileName(f.name), size: f.size, mime: String(f.type || '').slice(0, 100) };
+    const it = { name: cleanFileName(f.name), size: f.size, mime: String(f.type || '').slice(0, 100), ...extra[files.indexOf(f)] };
     const l = JSON.stringify(it).length + 1;
     if (cur.length && (cur.length >= MAX_ITEMS || len + l > MAX_DROP_JSON)) { groups.push(cur); cur = []; len = 0; }
     cur.push([it, f]); len += l;
@@ -765,15 +829,221 @@ function receiveItem(link, dc) {
 }
 
 // ---------- sending ----------
-async function sendText(peer, text) {
+const textBody = (m) => ({ k: 'text', text: m.text, ts: m.ts, ...(m.re ? { re: m.re } : {}) });
+async function sendText(peer, text, re) {
   text = text.trim().slice(0, MAX_TEXT);
   if (!text) return;
   const id = uid();
   const m = { key: keyOf(peer, id), id, chat: peer, dir: 'out', kind: 'text', text, ts: Date.now(), status: 'pending' };
+  if (re) m.re = re;
   await saveMsg(m);
   if (!canSeal(contacts.get(peer))) toast('Pair with this device again to send messages (its encryption key is missing).');
-  else post(peer, { k: 'text', text, ts: m.ts }, { mid: id });
+  else post(peer, textBody(m), { mid: id });
   renderNotice();
+}
+
+// ---------- reactions ----------
+// One per side per message, kept on the message as react: { me?, them? }.
+const setReact = (key, who, e) => mutate(key, (m) => {
+  if (m.kind === 'call' || m.gone || (m.react?.[who] || '') === e) return false;
+  const r = { ...m.react };
+  if (e) r[who] = e;
+  else delete r[who];
+  if (r.me || r.them) m.react = r;
+  else delete m.react;
+});
+
+// Picking the reaction you already gave takes it back.
+async function sendReact(key, e) {
+  let now = null;
+  const m = await mutate(key, (d) => {
+    if (d.kind === 'call' || d.gone) return false;
+    now = d.react?.me === e ? '' : e;
+    return false;
+  });
+  if (!m || now === null) return;
+  if (!canSeal(contacts.get(m.chat))) return toast('Pair with this device again to react (its encryption key is missing).');
+  await setReact(key, 'me', now);
+  // Only the newest reaction for a message needs to get through.
+  for (const o of [...outbox.values()]) if (o.to === m.chat && o.body.k === 'react' && o.body.id === m.id) outbox.delete(o.mid);
+  queue(m.chat, { k: 'react', id: m.id, e: now });
+}
+
+// ---------- deleting ----------
+function forget(key) {
+  if (player?.key === key) stopVoice();
+  for (const [k, u] of urls) if (k === key || k.startsWith(`${key}:`)) { URL.revokeObjectURL(u); urls.delete(k); }
+  if (replyTo && keyOf(replyTo.chat, replyTo.id) === key) setReply(null);
+}
+
+// Turns a message into a "this message was deleted" tombstone: no text, no files.
+// dir: only a message in that direction ('in' when the other side deleted theirs).
+async function entomb(key, dir) {
+  let done = false;
+  const m = await mutate(key, async (d) => {
+    if (d.dir !== dir || d.kind === 'call' || d.gone) return false;
+    if (d.kind === 'drop') await db.delBlobs(key);
+    const c = contacts.get(d.chat);
+    if (c && d.dir === 'in' && d.status !== 'read' && c.unread > 0) { c.unread--; saveContact(c); }
+    for (const f of ['items', 'state', 'got', 'okd', 'ctl', 'react', 're', 'file', 'blob']) delete d[f];
+    d.kind = 'text'; d.text = ''; d.gone = true;
+    done = true;
+  });
+  if (!done) return false;
+  abortXfer(key); // a drop still on its way stops, like a cancel
+  forget(key);
+  if (m.chat === active) renderShown(); // quotes of it change too
+  return true;
+}
+
+async function deleteForEveryone(key) {
+  const m = await db.get('messages', key);
+  if (!m || m.dir !== 'out') return;
+  if (!canSeal(contacts.get(m.chat))) return toast('Pair with this device again to delete for everyone (its encryption key is missing).');
+  if (await entomb(key, 'out')) queue(m.chat, { k: 'del', id: m.id });
+}
+
+// Local only. A drop that is still open is closed first, so the other side isn't left waiting.
+function deleteForMe(key) {
+  const p = msgChain.then(async () => {
+    const m = await db.get('messages', key);
+    if (!m) return;
+    if (m.kind === 'drop' && canSeal(contacts.get(m.chat))) {
+      const k = m.dir === 'out' && ['asking', 'sending'].includes(m.state) ? 'drop-cancel' : m.dir === 'in' && ['asking', 'receiving'].includes(m.state) ? 'drop-no' : null;
+      if (k) queue(m.chat, { k, id: m.id }, ctlFor(m.id, k).mid);
+    }
+    await db.del('messages', key);
+    await db.delBlobs(key);
+    abortXfer(key);
+    forget(key);
+    const c = contacts.get(m.chat);
+    if (c) {
+      if (m.dir === 'in' && m.kind !== 'call' && m.status !== 'read' && c.unread > 0) c.unread--;
+      if (c.last?.key === key) {
+        const rest = await db.chat(c.id);
+        if (rest.length) c.last = lastOf(rest[rest.length - 1]);
+        else delete c.last;
+      }
+      await saveContact(c);
+    }
+    if (m.chat === active) { shown = shown.filter((x) => x.key !== key); renderShown(); }
+    renderChats();
+  });
+  msgChain = p.catch(console.warn);
+  return msgChain;
+}
+
+// ---------- voice messages ----------
+// Recorded with MediaRecorder and sent as a one-item drop marked `voice`, which the other
+// side accepts without asking.
+const REC_TYPES = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg;codecs=opus'];
+
+async function startRec() {
+  if (rec || !active) return;
+  if (!canSeal(contacts.get(active))) return toast('Pair with this device again to send voice messages (its encryption key is missing).');
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) return toast(window.isSecureContext ? "This browser can't record voice messages." : 'Voice messages need HTTPS here.');
+  const r = (rec = { peer: active, chunks: [], ms: 0 });
+  try {
+    r.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    if (rec === r) rec = null;
+    return toast("Couldn't open the microphone.");
+  }
+  if (rec !== r) return stopStream(r.stream); // left the chat meanwhile
+  try {
+    const type = REC_TYPES.find((t) => MediaRecorder.isTypeSupported?.(t));
+    r.mr = new MediaRecorder(r.stream, type ? { mimeType: type, audioBitsPerSecond: 32000 } : {});
+    r.mr.ondataavailable = (e) => e.data?.size && r.chunks.push(e.data);
+    r.done = new Promise((res) => { r.mr.onstop = res; r.mr.onerror = res; });
+    r.mr.start();
+  } catch (e) {
+    console.warn('recorder', e);
+    rec = null;
+    stopStream(r.stream);
+    return toast("This browser can't record voice messages.");
+  }
+  r.t0 = Date.now();
+  r.tick = setInterval(() => {
+    r.ms = Math.min(Date.now() - r.t0, MAX_REC);
+    if (r.ms >= MAX_REC) { clearInterval(r.tick); if (r.mr.state !== 'inactive') r.mr.stop(); } // full: waits for send or discard
+    renderComposer();
+  }, 200);
+  renderComposer();
+}
+
+async function endRec(send) {
+  const r = rec;
+  if (!r) return;
+  rec = null;
+  renderComposer();
+  if (!r.mr) return; // still waiting for the microphone: startRec lets go of it
+  clearInterval(r.tick);
+  if (r.mr.state !== 'inactive') { r.ms = Math.min(Date.now() - r.t0, MAX_REC); r.mr.stop(); }
+  await r.done;
+  stopStream(r.stream);
+  if (send) await sendVoice(r.peer, new Blob(r.chunks, { type: r.mr.mimeType || r.chunks[0]?.type || '' }), r.ms / 1000);
+}
+
+// blob: the recording; secs: how long it ran, used if the audio can't be decoded here.
+async function sendVoice(peer, blob, secs) {
+  if (!blob.size) return toast('Nothing was recorded.');
+  if (blob.size > MAX_VOICE) return toast('That voice message is too long to send.');
+  const type = /^audio\/[\w.+-]+/i.exec(blob.type)?.[0].toLowerCase() || 'audio/webm'; // without ";codecs=…"
+  const ext = /mp4|m4a|aac/.test(type) ? 'm4a' : /ogg/.test(type) ? 'ogg' : 'webm';
+  const meta = await voiceMeta(blob);
+  const dur = Math.min(3600, Math.max(0, Math.round((meta?.dur ?? secs ?? 0) * 10) / 10)) || 0;
+  const file = new File([blob], `voice-${Date.now()}.${ext}`, { type });
+  await sendFiles(peer, [file], [{ voice: true, dur, ...(meta?.wave ? { wave: meta.wave } : {}) }]);
+}
+
+// Exact length and a 48-bar loudness outline (one hex digit a bar), from the decoded audio.
+async function voiceMeta(blob) {
+  try {
+    const Ctx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const buf = await new Ctx(1, 1, 44100).decodeAudioData(await blob.arrayBuffer());
+    const ch = buf.getChannelData(0), n = 48;
+    if (ch.length < n) return { dur: buf.duration, wave: '' };
+    const rms = [];
+    for (let i = 0; i < n; i++) {
+      const a = Math.floor((i * ch.length) / n), b = Math.floor(((i + 1) * ch.length) / n);
+      const step = Math.max(1, Math.floor((b - a) / 2000));
+      let sum = 0, cnt = 0;
+      for (let j = a; j < b; j += step) { sum += ch[j] * ch[j]; cnt++; }
+      rms.push(Math.sqrt(sum / cnt));
+    }
+    const top = Math.max(...rms, 0.02); // quiet recordings stay low instead of being blown up
+    return { dur: buf.duration, wave: rms.map((v) => Math.round((v / top) * 15).toString(16)).join('') };
+  } catch (e) {
+    console.warn('voice decode', e);
+    return null;
+  }
+}
+
+async function toggleVoice(m) {
+  if (player?.key === m.key) {
+    if (player.audio.paused) player.audio.play().catch(() => {});
+    else player.audio.pause();
+    return;
+  }
+  stopVoice();
+  const url = await itemUrl(m, 0);
+  if (!url) return toast('That voice message is not on this device.');
+  stopVoice();
+  const audio = new Audio(url);
+  const p = (player = { key: m.key, audio, dur: m.items[0].dur });
+  const paint = () => player === p && paintVoice(p.key);
+  audio.onplay = audio.onpause = audio.ontimeupdate = paint;
+  audio.onended = () => player === p && stopVoice();
+  audio.onerror = () => { if (player === p) { stopVoice(); toast("This browser can't play that voice message."); } };
+  audio.play().catch(() => {});
+}
+function stopVoice() {
+  const p = player;
+  if (!p) return;
+  player = null;
+  p.audio.onerror = null;
+  p.audio.pause();
+  paintVoice(p.key);
 }
 
 function markRead(chat) {
@@ -889,16 +1159,18 @@ function stopScan() {
 function notify(c, m) {
   if (document.visibilityState === 'visible' && m.chat === active) return;
   if (!('Notification' in window) || Notification.permission !== 'granted' || document.visibilityState === 'visible') return;
-  const body = m.kind === 'drop' ? `${c.name} wants to send ${dropTitle(m.items)}` : m.kind === 'text' ? m.text.slice(0, 200) : previewOf(m);
+  const body = m.kind === 'drop' && !isVoice(m) ? `${c.name} wants to send ${dropTitle(m.items)}` : m.kind === 'text' && !m.gone ? m.text.slice(0, 200) : previewOf(m);
   const n = new Notification(c.name, { body, tag: c.id, icon: 'icon.svg' });
   n.onclick = () => { window.focus(); openChat(c.id); n.close(); };
 }
 
 // ---------- UI: rendering ----------
 function previewOf(m) {
+  if (m.gone) return m.dir === 'out' ? 'You deleted this message' : 'This message was deleted';
   if (m.kind === 'file') return `📎 ${m.file.name}`;
   if (m.kind === 'drop') {
     const n = m.items.length;
+    if (isVoice(m)) return `🎤 Voice message (${voiceDur(m)})`;
     if (m.items.every((x) => isImg(x.mime))) return `📷 ${n === 1 ? 'Photo' : `${n} photos`}`;
     return `📎 ${n === 1 ? m.items[0].name : `${n} files`}`;
   }
@@ -1006,7 +1278,7 @@ function renderNotice() {
   if (!active) return;
   const c = contacts.get(active);
   const n = $('#notice');
-  const pending = shown.some((m) => m.dir === 'out' && m.status === 'pending');
+  const pending = shown.some((m) => m.dir === 'out' && m.status === 'pending' && !m.gone);
   const files = shown.some((m) => m.kind === 'drop' && busyDrop(m));
   if (!canSeal(c)) n.textContent = `Pair with ${c.name} again to send messages: this pairing is from an older AnyDrop without encryption keys.`;
   else if (pending && !wsUp) n.textContent = "You're offline. Messages will go out when AnyDrop reconnects.";
@@ -1017,6 +1289,7 @@ function renderNotice() {
 
 async function openChat(id) {
   if (!contacts.has(id)) return;
+  if (id !== active) leaveChat();
   active = id;
   shown = await db.chat(id);
   $('#app').classList.add('in-chat');
@@ -1029,7 +1302,15 @@ async function openChat(id) {
   markRead(id);
   if (matchMedia('(min-width: 721px)').matches) $('#input').focus();
 }
+// Things that belong to the open chat: the reply being written, a recording, the menu.
+function leaveChat() {
+  endRec(false);
+  setReply(null);
+  closeMenu();
+  stopVoice();
+}
 function closeChat() {
+  leaveChat();
   active = null;
   shown = [];
   $('#app').classList.remove('in-chat');
@@ -1081,7 +1362,18 @@ function msgNode(m) {
   if (m.kind === 'call') return callNode(m);
   const b = el('div', `msg ${m.dir}`);
   b.dataset.key = m.key;
-  if (m.kind === 'drop') {
+  const act = el('button', 'act');
+  act.type = 'button';
+  act.setAttribute('aria-label', 'Message actions');
+  act.innerHTML = I.more;
+  b.append(act);
+  if (m.gone) {
+    b.classList.add('gone');
+    b.append(el('span', 'text', previewOf(m)));
+  } else if (m.kind === 'drop' && isVoice(m)) {
+    b.classList.add('voice');
+    voiceBody(b, m);
+  } else if (m.kind === 'drop') {
     b.classList.add('drop');
     dropBody(b, m);
   } else if (m.kind === 'file') {
@@ -1106,13 +1398,180 @@ function msgNode(m) {
     }
     b.append(f);
   } else {
-    b.append(el('span', 'text'));
-    b.firstChild.append(linkify(m.text));
+    if (m.re) b.append(quoteNode(m));
+    const t = el('span', 'text');
+    t.append(linkify(m.text));
+    b.append(t);
   }
   const meta = el('span', 'meta', timeFmt.format(m.ts));
-  if (m.dir === 'out') meta.append(tickIcon(m.status));
+  if (m.dir === 'out' && !m.gone) meta.append(tickIcon(m.status));
   b.append(meta);
+  if (m.react?.me || m.react?.them) {
+    // Under the bubble: theirs, then yours (tap yours to take it back).
+    b.classList.add('has-react');
+    const row = el('div', 'reacts');
+    const { me: mine, them } = m.react;
+    if (them && them !== mine) row.append(el('span', 'chip', them));
+    if (mine) {
+      const chip = el('button', 'chip mine', mine === them ? `${mine} 2` : mine);
+      chip.type = 'button';
+      chip.title = 'Remove your reaction';
+      chip.onclick = () => sendReact(m.key, mine);
+      row.append(chip);
+    }
+    b.append(row);
+  }
   return b;
+}
+
+// ---------- replies ----------
+// One line that stands for a message, in a quote or the reply bar.
+function snippetOf(m) {
+  if (m.gone) return 'Deleted message';
+  if (m.kind === 'drop') return dropWhat(m.items);
+  if (m.kind === 'file') return m.file.name;
+  if (m.kind === 'call') return callLabel(m);
+  return String(m.text || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+}
+function quoteParts(chat, id) {
+  const o = shown.find((x) => x.chat === chat && x.id === id);
+  if (!o) return { who: '', text: 'Message', key: null };
+  return { who: o.dir === 'out' ? 'You' : contacts.get(chat)?.name || 'Device', text: snippetOf(o), key: o.key };
+}
+function quoteNode(m) {
+  const { who, text, key } = quoteParts(m.chat, m.re);
+  const q = el('button', 'quote');
+  q.type = 'button';
+  if (who) q.append(el('b', '', who));
+  q.append(el('span', '', text));
+  if (key) q.onclick = () => jumpTo(key);
+  else q.disabled = true;
+  return q;
+}
+function jumpTo(key) {
+  const node = $('#msgs').querySelector(`[data-key="${CSS.escape(key)}"]`);
+  if (!node) return;
+  node.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  node.classList.remove('flash');
+  void node.offsetWidth; // restart the animation
+  node.classList.add('flash');
+}
+function setReply(m) {
+  replyTo = m ? { chat: m.chat, id: m.id } : null;
+  const bar = $('#replyBar');
+  bar.hidden = !replyTo;
+  if (!replyTo) return;
+  const { who, text } = quoteParts(m.chat, m.id);
+  $('#replyWho').textContent = who;
+  $('#replyText').textContent = text;
+  $('#input').focus();
+}
+
+// ---------- message menu: react, reply, copy, delete ----------
+let menuKey = null;
+function closeMenu() {
+  menuKey = null;
+  $('#msgMenu').hidden = true;
+}
+function openMenu(key) {
+  const m = shown.find((x) => x.key === key);
+  const node = $('#msgs').querySelector(`[data-key="${CSS.escape(key)}"]`);
+  if (!m || !node || m.kind === 'call') return;
+  const menu = $('#msgMenu');
+  const parts = [];
+  const item = (label, icon, fn, cls = '') => {
+    const x = el('button', `mi ${cls}`);
+    x.type = 'button';
+    x.setAttribute('role', 'menuitem');
+    x.innerHTML = icon;
+    x.append(el('span', '', label));
+    x.onclick = () => { closeMenu(); fn(); };
+    parts.push(x);
+    return x;
+  };
+  if (!m.gone) {
+    const row = el('div', 'emojis');
+    for (const e of EMOJI) {
+      const x = el('button', `emoji${m.react?.me === e ? ' on' : ''}`, e);
+      x.type = 'button';
+      x.dataset.e = e;
+      x.setAttribute('aria-label', m.react?.me === e ? `Remove ${e}` : `React with ${e}`);
+      x.onclick = () => { closeMenu(); sendReact(key, e); };
+      row.append(x);
+    }
+    parts.push(row);
+    item('Reply', I.reply, () => setReply(m)).dataset.act = 'reply';
+    if (m.kind === 'text') item('Copy', I.copy, () => navigator.clipboard?.writeText(m.text).then(() => toast('Copied'), () => toast("Couldn't copy"))).dataset.act = 'copy';
+  }
+  item('Delete for me', I.trash, () => confirm('Delete this message from this device?') && deleteForMe(key)).dataset.act = 'del-me';
+  if (m.dir === 'out' && !m.gone) {
+    item('Delete for everyone', I.trash, () => confirm(`Delete this message for you and ${contacts.get(m.chat)?.name || 'the other device'}?`) && deleteForEveryone(key), 'danger').dataset.act = 'del-all';
+  }
+  menu.replaceChildren(...parts);
+  menu.hidden = false;
+  menuKey = key;
+  // Next to the bubble, kept inside the window.
+  const r = node.getBoundingClientRect(), w = menu.offsetWidth, h = menu.offsetHeight, pad = 8;
+  const left = m.dir === 'out' ? r.right - w : r.left;
+  const top = r.bottom + 6 + h <= innerHeight - pad ? r.bottom + 6 : r.top - 6 - h;
+  menu.style.left = `${Math.max(pad, Math.min(left, innerWidth - w - pad))}px`;
+  menu.style.top = `${Math.max(pad, Math.min(top, innerHeight - h - pad))}px`;
+}
+
+// ---------- voice bubbles ----------
+const voiceFrac = (m) => {
+  if (player?.key !== m.key) return 0;
+  const a = player.audio, total = m.items[0].dur || (Number.isFinite(a.duration) ? a.duration : 0);
+  return total ? Math.min(1, a.currentTime / total) : 0;
+};
+function voiceTime(m) {
+  if (player?.key === m.key) return fmtDur(Math.floor(player.audio.currentTime));
+  if (hasItem(m, 0)) return ['declined', 'canceled', 'failed'].includes(m.state) ? `${voiceDur(m)} · ${dropLine(m)}` : voiceDur(m);
+  return busyDrop(m) || m.state === 'asking' ? '…' : dropLine(m);
+}
+function voiceBody(b, m) {
+  const it = m.items[0];
+  const row = el('div', 'vrow');
+  const play = el('button', 'vplay');
+  play.type = 'button';
+  if (!hasItem(m, 0)) {
+    // Not here yet: a spinner while it is on its way, a mark if it never will be.
+    play.disabled = true;
+    const waiting = busyDrop(m) || m.state === 'asking';
+    play.innerHTML = waiting ? '<i class="spin"></i>' : I.fail;
+    play.setAttribute('aria-label', waiting ? 'Receiving voice message' : 'Voice message not received');
+    b.classList.toggle('waiting', waiting);
+  } else {
+    const on = player?.key === m.key && !player.audio.paused;
+    play.innerHTML = on ? I.pause : I.play;
+    play.setAttribute('aria-label', on ? 'Pause' : 'Play voice message');
+    play.onclick = () => toggleVoice(m);
+  }
+  const bars = el('div', 'vbars');
+  const wave = it.wave || '3'.repeat(48), at = voiceFrac(m) * wave.length;
+  for (let i = 0; i < wave.length; i++) {
+    const s = el('i', i < at ? 'on' : '');
+    s.style.height = `${14 + (parseInt(wave[i], 16) / 15) * 86}%`;
+    bars.append(s);
+  }
+  row.append(play, bars, el('small', 'vtime', voiceTime(m)));
+  b.append(row);
+}
+// Play progress repaints in place.
+function paintVoice(key) {
+  const m = shown.find((x) => x.key === key);
+  const node = document.querySelector(`[data-key="${CSS.escape(key)}"]`);
+  if (!m || !node || !node.classList.contains('voice') || !hasItem(m, 0)) return;
+  const on = player?.key === key && !player.audio.paused;
+  const play = node.querySelector('.vplay');
+  if (play.dataset.on !== String(on)) {
+    play.dataset.on = String(on);
+    play.innerHTML = on ? I.pause : I.play;
+    play.setAttribute('aria-label', on ? 'Pause' : 'Play voice message');
+  }
+  const bars = node.querySelectorAll('.vbars i'), at = voiceFrac(m) * bars.length;
+  bars.forEach((s, i) => s.classList.toggle('on', i < at));
+  node.querySelector('.vtime').textContent = voiceTime(m);
 }
 
 // ---------- drop bubbles ----------
@@ -1617,6 +2076,10 @@ $('#backBtn').innerHTML = I.back;
 $('#attachBtn').innerHTML = I.clip;
 $('#attachBtn2').innerHTML = I.file;
 $('#sendBtn').innerHTML = I.send;
+$('#micBtn').innerHTML = I.mic;
+$('#recSend').innerHTML = I.send;
+$('#recCancel').innerHTML = I.trash;
+$('#replyX').innerHTML = I.close;
 $('#voiceBtn').innerHTML = I.call;
 $('#videoBtn').innerHTML = I.video;
 $('#acceptCall').innerHTML = I.call;
@@ -1666,9 +2129,62 @@ $('#backBtn').onclick = closeChat;
 
 const input = $('#input');
 const grow = () => { input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 140)}px`; };
+// Mic when there is nothing to send, Send when there is; the recording bar takes over both.
+function renderComposer() {
+  const on = !!rec?.mr, text = !!input.value.trim();
+  $('#composer').classList.toggle('recording', on);
+  $('#recBar').hidden = !on;
+  $('#attachBtn').hidden = input.hidden = on;
+  $('#sendBtn').hidden = on || !text;
+  $('#micBtn').hidden = on || text;
+  if (on) $('#recTime').textContent = fmtDur(Math.floor(rec.ms / 1000));
+}
+renderComposer();
+$('#micBtn').onclick = startRec;
+$('#recCancel').onclick = () => endRec(false);
+$('#recSend').onclick = () => endRec(true);
+$('#replyX').onclick = () => setReply(null);
+
+// message actions: the arrow on a bubble, right-click, or a long press
+const msgsEl = $('#msgs');
+let pressTimer = null, pressed = false;
+msgsEl.addEventListener('click', (e) => {
+  if (pressed) { pressed = false; e.preventDefault(); e.stopPropagation(); return; } // the tap that ended a long press
+  const a = e.target.closest('.act');
+  if (!a) return;
+  const key = a.parentElement.dataset.key;
+  if (menuKey === key) closeMenu();
+  else openMenu(key);
+}, true);
+msgsEl.addEventListener('contextmenu', (e) => {
+  const b = e.target.closest('.msg');
+  if (!b || e.target.closest('a')) return;
+  e.preventDefault();
+  openMenu(b.dataset.key);
+});
+msgsEl.addEventListener('touchstart', (e) => {
+  pressed = false;
+  clearTimeout(pressTimer);
+  const b = e.target.closest('.msg');
+  if (!b || e.touches.length !== 1) return;
+  pressTimer = setTimeout(() => { pressed = true; openMenu(b.dataset.key); }, 500);
+}, { passive: true });
+for (const ev of ['touchmove', 'touchend', 'touchcancel']) msgsEl.addEventListener(ev, () => clearTimeout(pressTimer), { passive: true });
+msgsEl.addEventListener('scroll', () => { clearTimeout(pressTimer); closeMenu(); }, { passive: true });
+document.addEventListener('pointerdown', (e) => { if (menuKey && !e.target.closest('#msgMenu, .act')) closeMenu(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !$('#viewer').hidden) return;
+  if (menuKey) closeMenu();
+  else if (rec) endRec(false);
+  else if (replyTo) setReply(null);
+});
+window.addEventListener('resize', closeMenu);
+window.addEventListener('pagehide', () => endRec(false));
+
 let lastTyping = 0;
 input.oninput = () => {
   grow();
+  renderComposer();
   if (active && input.value && Date.now() - lastTyping > 2500) {
     lastTyping = Date.now();
     post(active, { k: 'typing' }, { live: true });
@@ -1681,10 +2197,12 @@ input.onkeydown = (e) => {
 $('#composer').onsubmit = (e) => {
   e.preventDefault();
   if (!active || !input.value.trim()) return;
-  sendText(active, input.value);
+  sendText(active, input.value, replyTo?.chat === active ? replyTo.id : undefined);
+  setReply(null);
   input.value = '';
   lastTyping = 0;
   grow();
+  renderComposer();
   input.focus();
 };
 input.onpaste = (e) => {
@@ -1787,6 +2305,7 @@ $('#pdClear').onclick = async () => {
   if (!c || !confirm(`Clear all messages with ${c.name} on this device?`)) return;
   await db.clearChat(c.id);
   for (const [k, u] of urls) if (k.startsWith(`${c.id}:`)) { URL.revokeObjectURL(u); urls.delete(k); }
+  leaveChat();
   delete c.last; c.unread = 0;
   await saveContact(c);
   $('#peerDlg').close();
@@ -1798,6 +2317,7 @@ $('#pdRemove').onclick = async () => {
   await db.clearChat(c.id);
   await db.del('contacts', c.id);
   contacts.delete(c.id);
+  for (const o of [...outbox.values()]) if (o.to === c.id) outSent(o.mid);
   if (call?.peer === c.id) endCall('hangup');
   const l = links.get(c.id);
   if (l) dropLink(l, false);
@@ -1822,6 +2342,7 @@ async function start() {
     await db.put('kv', profile, 'profile');
   }
   for (const c of await db.all('contacts')) contacts.set(c.id, c);
+  for (const o of (await db.get('kv', 'outbox')) || []) if (contacts.has(o?.to)) outbox.set(o.mid, o);
   if (pendingPair && pendingPair.id === me.id) pendingPair = null; // scanned our own code
   try {
     const cfg = await (await fetch('/api/config')).json();
