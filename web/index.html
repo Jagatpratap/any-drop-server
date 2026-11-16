@@ -42,6 +42,8 @@
             <span id="peerAvatar" class="avatar sm"></span>
             <span class="peer-text"><b id="peerName"></b><small id="peerStatus"></small></span>
           </button>
+          <button id="voiceBtn" class="icon-btn" title="Voice call" aria-label="Voice call" disabled></button>
+          <button id="videoBtn" class="icon-btn" title="Video call" aria-label="Video call" disabled></button>
           <button id="attachBtn2" class="icon-btn" title="Send files" aria-label="Send files"></button>
         </header>
         <div id="msgs" class="msgs" tabindex="-1"></div>
@@ -107,12 +109,44 @@
     </div>
     <div class="field"><span>Device ID</span><code id="pdId" class="fp"></code>
       <small class="muted">Check that it matches the ID shown in that device's settings.</small></div>
+    <label class="check"><input type="checkbox" id="pdAuto">
+      <span>Auto-accept files from this device<small class="muted">Files it sends start downloading without asking.</small></span></label>
     <div class="row spread">
       <button class="btn ghost danger" id="pdRemove">Remove device</button>
       <button class="btn ghost" id="pdClear">Clear chat</button>
       <button class="btn" id="pdClose">Close</button>
     </div>
   </dialog>
+
+  <div id="viewer" class="viewer" hidden role="dialog" aria-label="Photo viewer">
+    <div class="v-top">
+      <span class="v-title"><b id="vName"></b><small id="vCount"></small></span>
+      <button id="vSave" class="icon-btn" title="Download" aria-label="Download"></button>
+      <button id="vClose" class="icon-btn" title="Close" aria-label="Close"></button>
+    </div>
+    <img id="vImg" alt="">
+    <button id="vPrev" class="icon-btn v-nav prev" aria-label="Previous photo"></button>
+    <button id="vNext" class="icon-btn v-nav next" aria-label="Next photo"></button>
+  </div>
+
+  <div id="call" class="call" hidden role="dialog" aria-label="Call">
+    <video id="remoteVideo" class="rv" autoplay playsinline></video>
+    <video id="localVideo" class="lv" autoplay playsinline muted hidden></video>
+    <div class="call-info">
+      <span id="callAvatar" class="avatar xl"></span>
+      <h2 id="callName"></h2>
+      <p><span id="callKind"></span> · <span id="callStatus"></span></p>
+    </div>
+    <div id="callIncoming" class="call-btns" hidden>
+      <span class="cb"><button id="declineCall" class="round bad" aria-label="Decline"></button><small>Decline</small></span>
+      <span class="cb"><button id="acceptCall" class="round good" aria-label="Accept"></button><small>Accept</small></span>
+    </div>
+    <div id="callControls" class="call-btns">
+      <span class="cb"><button id="muteBtn" class="round" aria-label="Mute"></button></span>
+      <span class="cb"><button id="camBtn" class="round" aria-label="Turn camera off"></button></span>
+      <span class="cb"><button id="hangBtn" class="round bad" aria-label="Hang up"></button></span>
+    </div>
+  </div>
 
   <div id="replaced" class="replaced" hidden>
     <p>AnyDrop is open in another tab or window.</p>

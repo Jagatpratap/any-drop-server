@@ -2,7 +2,10 @@
 // lives only on this device.
 //   kv        identity, profile
 //   contacts  { id, pub, name, device, addedAt, lastSeen, unread, last, waiting }
-//   messages  { key: chat:id, id, chat, dir, kind, text|file+blob, ts, status, rs }
+//   messages  { key: chat:id, id, chat, dir, kind, ts, status, rs, ... }
+//             kind text: text · kind file (old, read-only): file+blob
+//             kind drop: items, state, okd|got, ctl · kind call: video, outcome, dur
+//   blobs     drop files, key "<chat>:<msg id>:<item index>"
 
 // ?profile=x keeps a separate identity, so one browser can act as several devices (testing).
 export const PROFILE = (new URLSearchParams(location.search).get('profile') || '').replace(/[^\w-]/g, '').slice(0, 32);
@@ -10,12 +13,15 @@ export const PROFILE = (new URLSearchParams(location.search).get('profile') || '
 let dbp;
 function open() {
   return (dbp ||= new Promise((resolve, reject) => {
-    const r = indexedDB.open(PROFILE ? `anydrop-${PROFILE}` : 'anydrop', 1);
-    r.onupgradeneeded = () => {
+    const r = indexedDB.open(PROFILE ? `anydrop-${PROFILE}` : 'anydrop', 2);
+    r.onupgradeneeded = (e) => {
       const db = r.result;
-      db.createObjectStore('kv');
-      db.createObjectStore('contacts', { keyPath: 'id' });
-      db.createObjectStore('messages', { keyPath: 'key' }).createIndex('chat', ['chat', 'ts']);
+      if (e.oldVersion < 1) {
+        db.createObjectStore('kv');
+        db.createObjectStore('contacts', { keyPath: 'id' });
+        db.createObjectStore('messages', { keyPath: 'key' }).createIndex('chat', ['chat', 'ts']);
+      }
+      if (e.oldVersion < 2) db.createObjectStore('blobs');
     };
     r.onsuccess = () => resolve(r.result);
     r.onerror = () => reject(r.error);
@@ -36,6 +42,7 @@ export const db = {
   all: async (store) => done((await os(store)).getAll()),
   chat: async (chat) => done((await os('messages')).index('chat').getAll(chatRange(chat))),
   async clearChat(chat) {
+    await done((await os('blobs', 'readwrite')).delete(IDBKeyRange.bound(`${chat}:`, `${chat}:\uffff`)));
     const store = await os('messages', 'readwrite');
     return new Promise((resolve, reject) => {
       const cur = store.index('chat').openKeyCursor(chatRange(chat));

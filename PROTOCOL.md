@@ -40,5 +40,48 @@ Sealed JSON bodies:
 | `typing` | | sent with `live:true` |
 | `profile` | `name, device` | name or type changed |
 
-## WebRTC (files, web app)
-`signal {to, data}` is forwarded between online mutual contacts. Offers and answers carry `sig = sign("anydrop-sdp:<sid>:<from>><to>:<type>:<sdp>")`.
+## WebRTC link (files)
+`signal {to, data}` is forwarded between online mutual contacts. Each pair of devices keeps one
+`RTCPeerConnection` with an ordered data channel labelled `chat`. The device with the lower id
+dials; the other sends `{hey:1}` to ask to be dialed. Offers and answers carry
+`sig = sign("anydrop-sdp:<sid>:<from>><to>:<type>:<sdp>")`; ICE is `{sid, ice}`.
+On the `chat` channel: `{t:"hello", name, device}`, `{t:"ping"}` / `{t:"pong"}` (heartbeat).
+
+## Drops: files and photo collections, AirDrop-style
+Nothing is sent until the receiver says yes. The request travels sealed through the mailbox,
+so it reaches a device that is offline; the bytes go only over WebRTC, so both must be online.
+
+Sealed bodies (the drop id is the `mid` of the `drop` message):
+| `k` | fields | |
+|---|---|---|
+| `drop` | `ts, items:[{name, size, mime}]` (1..100 items) | "X wants to send 5 photos". Gets ✓ / ✓✓ like text. |
+| `drop-ok` | `id` | receiver accepted |
+| `drop-no` | `id` | receiver declined |
+| `drop-cancel` | `id` | sender withdrew it (before or during the transfer) |
+| `drop-done` | `id` | receiver has every file |
+
+After `drop-ok`, when the link is open, the sender opens one data channel per item, labelled
+`file:<id>:<i>`, one at a time in order. Frames: a JSON header `{drop:id, i, name, size, mime}`,
+binary chunks (64 KiB), then the string `end`. The receiver answers the string `ok` once the item
+is stored, then the channel closes. The receiver refuses (closes) channels for drops it hasn't
+accepted, unknown indices and size mismatches. If the link breaks, the sender resumes from the
+first item without `ok`; the receiver discards a partial item and takes it again from byte 0.
+
+States: sender `asking → sending → done` or `declined | canceled | failed`;
+receiver `asking → receiving → done` or `declined | canceled`.
+A device may auto-accept drops from a contact if the user turned that on for that contact.
+
+## Calls (voice and video)
+One extra `RTCPeerConnection` per call, signalled with `signal` frames (both must be online):
+| `op` | fields | |
+|---|---|---|
+| `ring` | `call, video, sdp:{type:"offer", sdp}, sig` | caller starts; sig as above with `sid = call` |
+| `ringing` | `call` | callee is showing the call |
+| `answer` | `call, sdp:{type:"answer", sdp}, sig` | callee picked up |
+| `ice` | `call, ice` | |
+| `cam` | `call, on` | the sender turned its camera off/on |
+| `end` | `call, why: "hangup" \| "decline" \| "busy" \| "cancel" \| "timeout"` | |
+
+The caller gives up after 45 s without an answer (`end` with `why:"timeout"`). A device already
+in a call answers `end` with `why:"busy"`. Each side keeps its own call log; nothing about calls
+is stored on the server.
